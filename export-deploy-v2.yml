@@ -1,0 +1,85 @@
+# Proyecto: PowerPlatformDevops (organización cabata27)
+# Versión 2: igual que export-deploy.yml, pero sube la versión de la solución
+# en DEV antes de exportar. Úsalo para redesplegar (actualizar) PruebDevopos.
+
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  SolutionName: 'PruebDevopos'   # nombre único (columna Name) de la solución
+
+stages:
+- stage: Build
+  displayName: 'Exportar de DEV'
+  jobs:
+  - job: Export
+    displayName: 'Exportar solución administrada'
+    steps:
+    - task: PowerPlatformToolInstaller@2
+      displayName: 'Instalar Power Platform CLI'
+    - task: PowerPlatformWhoAmi@2
+      displayName: 'Validar Devops_Dev'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+    - task: PowerPlatformSetSolutionVersion@2
+      displayName: 'Subir versión a 1.0.0.$(Build.BuildId)'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+        SolutionName: '$(SolutionName)'
+        SolutionVersionNumber: '1.0.0.$(Build.BuildId)'
+    - task: PowerPlatformExportSolution@2
+      displayName: 'Exportar $(SolutionName) (administrada)'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+        SolutionName: '$(SolutionName)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)/$(SolutionName)_managed.zip'
+        Managed: true
+        AsyncOperation: true
+        MaxAsyncWaitTime: 60
+    - publish: '$(Build.ArtifactStagingDirectory)'
+      displayName: 'Publicar artefacto'
+      artifact: PowerPlatformSolution
+
+- stage: Deploy_PROD
+  displayName: 'Importar en PROD'
+  dependsOn: Build
+  jobs:
+  - deployment: Import
+    displayName: 'Importar solución administrada'
+    environment: 'PowerPlatform-PROD'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: PowerPlatformToolInstaller@2
+            displayName: 'Instalar Power Platform CLI'
+          - task: PowerPlatformWhoAmi@2
+            displayName: 'Validar Devops_prod'
+            inputs:
+              authenticationType: 'PowerPlatformSPN'
+              PowerPlatformSPN: 'Devops_prod'
+          - task: PowerPlatformImportSolution@2
+            displayName: 'Importar $(SolutionName) en PROD'
+            inputs:
+              authenticationType: 'PowerPlatformSPN'
+              PowerPlatformSPN: 'Devops_prod'
+              SolutionInputFile: '$(Pipeline.Workspace)/PowerPlatformSolution/$(SolutionName)_managed.zip'
+              AsyncOperation: true
+              MaxAsyncWaitTime: 60
+              PublishWorkflows: true
+              # Upgrade (borra en PROD lo que quitaste en DEV). Solo si PruebDevopos ya existe en PROD:
+              # HoldingSolution: true
+          # Si activas HoldingSolution, descomenta también este paso:
+          # - task: PowerPlatformApplySolutionUpgrade@2
+          #   displayName: 'Aplicar upgrade de $(SolutionName)'
+          #   inputs:
+          #     authenticationType: 'PowerPlatformSPN'
+          #     PowerPlatformSPN: 'Devops_prod'
+          #     SolutionName: '$(SolutionName)'
+          #     AsyncOperation: true
+          #     MaxAsyncWaitTime: 60
