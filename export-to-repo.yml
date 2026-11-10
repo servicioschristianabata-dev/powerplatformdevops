@@ -1,0 +1,59 @@
+# Proyecto: PowerPlatformDevops (organización cabata27)
+# Guarda PruebDevopos en el repositorio: exporta la solución NO administrada
+# de Desarrollo, la desempaqueta en XML y hace commit + push a main.
+# Corre en el agente propio (pool Default). No requiere PowerShell 7 ni instalar Git.
+
+trigger: none
+
+pool:
+  name: 'Default'
+
+variables:
+  SolutionName: 'PruebDevopos'
+
+steps:
+- checkout: self
+  persistCredentials: true
+  clean: true
+
+- task: PowerPlatformToolInstaller@2
+  displayName: 'Instalar Power Platform CLI'
+
+- task: PowerPlatformWhoAmi@2
+  displayName: 'Validar Devops_Dev'
+  inputs:
+    authenticationType: 'PowerPlatformSPN'
+    PowerPlatformSPN: 'Devops_Dev'
+
+- task: PowerPlatformExportSolution@2
+  displayName: 'Exportar $(SolutionName) (no administrada)'
+  inputs:
+    authenticationType: 'PowerPlatformSPN'
+    PowerPlatformSPN: 'Devops_Dev'
+    SolutionName: '$(SolutionName)'
+    SolutionOutputFile: '$(Build.ArtifactStagingDirectory)/$(SolutionName).zip'
+    Managed: false
+    AsyncOperation: true
+    MaxAsyncWaitTime: 60
+
+- powershell: Remove-Item -Recurse -Force "solutions/$(SolutionName)" -ErrorAction SilentlyContinue
+  displayName: 'Limpiar la carpeta anterior'
+
+- task: PowerPlatformUnpackSolution@2
+  displayName: 'Desempaquetar en XML'
+  inputs:
+    SolutionInputFile: '$(Build.ArtifactStagingDirectory)/$(SolutionName).zip'
+    SolutionTargetFolder: '$(Build.SourcesDirectory)/solutions/$(SolutionName)'
+    SolutionType: 'Unmanaged'
+
+- powershell: |
+    $env:PATH = "$env:AGENT_HOMEDIRECTORY\externals\git\cmd;$env:PATH"
+    $env:GIT_REDIRECT_STDERR = '2>&1'
+    git config user.email "pipeline@powerplatformdevops"
+    git config user.name "Pipeline PowerPlatformDevops"
+    git add --all solutions
+    git diff --cached --quiet
+    if ($LASTEXITCODE -eq 0) { Write-Host "Sin cambios: no hay nada que guardar."; exit 0 }
+    git commit -m "$(SolutionName) desde Desarrollo - run $(Build.BuildNumber) [skip ci]"
+    git push origin HEAD:main
+  displayName: 'Commit y push a main'
