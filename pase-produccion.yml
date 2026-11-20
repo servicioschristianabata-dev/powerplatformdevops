@@ -1,0 +1,177 @@
+# Proyecto: PowerPlatformDevops (organización cabata27)
+# Sesión 5 · Pase a producción solicitado desde Microsoft Forms.
+# Lo lanza el flujo "Pase a producción - Solicitud" (acción Run a pipeline).
+# Etapa 1 Respaldo:   publica, sube la versión, exporta, guarda el XML en el repo y publica el artefacto.
+# Etapa 2 Produccion: espera la aprobación del Environment PowerPlatform-PROD e importa en Devops_Prod.
+# Corre en el agente propio (pool Default).
+
+trigger: none
+pr: none
+
+parameters:
+- name: solucion
+  displayName: 'Solución (nombre único)'
+  type: string
+  default: 'AppEventosReactor'
+  values:                      # solo estas soluciones pueden pasar a PROD
+  - AppEventosReactor
+  - PruebDevopos
+- name: tipoDespliegue
+  displayName: 'Tipo de despliegue'
+  type: string
+  default: 'Update'
+  values:
+  - Update
+  - Upgrade
+- name: solicitante
+  displayName: 'Correo de quien solicita'
+  type: string
+  default: 'manual'
+- name: motivo
+  displayName: 'Motivo del cambio'
+  type: string
+  default: 'Ejecución manual'
+
+name: 'Pase-${{ parameters.solucion }}-$(Date:yyyyMMdd)$(Rev:.r)'
+
+pool:
+  name: 'Default'
+
+variables:
+  SolutionName: '${{ parameters.solucion }}'
+  SolutionVersion: '1.0.0.$(Build.BuildId)'
+
+stages:
+- stage: Respaldo
+  displayName: 'Respaldo: versión, repo y artefacto'
+  jobs:
+  - job: Exportar
+    displayName: 'Exportar de DEV y guardar en el repo'
+    steps:
+    - checkout: self
+      persistCredentials: true        # deja el token para que git push funcione
+      clean: true
+
+    - powershell: |
+        Write-Host "Solución:    $(SolutionName)"
+        Write-Host "Tipo:        ${{ parameters.tipoDespliegue }}"
+        Write-Host "Solicitante: $env:SOLICITANTE"
+        Write-Host "Motivo:      $env:MOTIVO"
+      displayName: 'Datos de la solicitud'
+      env:                            # el texto del formulario entra como variable, nunca dentro del script
+        SOLICITANTE: ${{ parameters.solicitante }}
+        MOTIVO: ${{ parameters.motivo }}
+
+    - task: PowerPlatformToolInstaller@2
+      displayName: 'Instalar Power Platform CLI'
+
+    - task: PowerPlatformWhoAmi@2
+      displayName: 'Validar Devops_Dev'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+
+    - task: PowerPlatformPublishCustomizations@2
+      displayName: 'Publicar personalizaciones en DEV'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+        AsyncOperation: true
+        MaxAsyncWaitTime: 60
+
+    - task: PowerPlatformSetSolutionVersion@2
+      displayName: 'Subir versión a $(SolutionVersion)'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+        SolutionName: '$(SolutionName)'
+        SolutionVersionNumber: '$(SolutionVersion)'
+
+    - task: PowerPlatformExportSolution@2
+      displayName: 'Exportar no administrada (para el repo)'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+        SolutionName: '$(SolutionName)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)/$(SolutionName).zip'
+        Managed: false
+        AsyncOperation: true
+        MaxAsyncWaitTime: 60
+
+    - task: PowerPlatformExportSolution@2
+      displayName: 'Exportar administrada (para PROD)'
+      inputs:
+        authenticationType: 'PowerPlatformSPN'
+        PowerPlatformSPN: 'Devops_Dev'
+        SolutionName: '$(SolutionName)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)/$(SolutionName)_managed.zip'
+        Managed: true
+        AsyncOperation: true
+        MaxAsyncWaitTime: 60
+
+    - powershell: Remove-Item -Recurse -Force "solutions/$(SolutionName)" -ErrorAction SilentlyContinue
+      displayName: 'Limpiar la carpeta anterior'
+
+    - task: PowerPlatformUnpackSolution@2
+      displayName: 'Desempaquetar en XML'
+      inputs:
+        SolutionInputFile: '$(Build.ArtifactStagingDirectory)/$(SolutionName).zip'
+        SolutionTargetFolder: '$(Build.SourcesDirectory)/solutions/$(SolutionName)'
+        SolutionType: 'Unmanaged'
+
+    - powershell: |
+        $env:PATH = "$env:AGENT_HOMEDIRECTORY\externals\git\cmd;$env:PATH"
+        $env:GIT_REDIRECT_STDERR = '2>&1'
+        git config user.email "pipeline@powerplatformdevops"
+        git config user.name "Pipeline PowerPlatformDevops"
+        git add --all solutions
+        git diff --cached --quiet
+        if ($LASTEXITCODE -eq 0) { Write-Host "Sin cambios: no hay nada que guardar."; exit 0 }
+        git commit -m "$(SolutionName) $(SolutionVersion) - solicitado por $env:SOLICITANTE [skip ci]"
+        git push origin HEAD:main
+      displayName: 'Respaldo: commit y push a main'
+      env:
+        SOLICITANTE: ${{ parameters.solicitante }}
+
+    - publish: '$(Build.ArtifactStagingDirectory)'
+      displayName: 'Publicar artefacto'
+      artifact: Solucion
+
+- stage: Produccion
+  displayName: 'Producción (${{ parameters.tipoDespliegue }})'
+  dependsOn: Respaldo
+  jobs:
+  - deployment: Importar
+    displayName: 'Importar solución administrada'
+    environment: 'PowerPlatform-PROD'   # aquí espera la aprobación
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: PowerPlatformToolInstaller@2
+            displayName: 'Instalar Power Platform CLI'
+          - task: PowerPlatformWhoAmi@2
+            displayName: 'Validar Devops_prod'
+            inputs:
+              authenticationType: 'PowerPlatformSPN'
+              PowerPlatformSPN: 'Devops_prod'
+          - task: PowerPlatformImportSolution@2
+            displayName: 'Importar $(SolutionName) en PROD'
+            inputs:
+              authenticationType: 'PowerPlatformSPN'
+              PowerPlatformSPN: 'Devops_prod'
+              SolutionInputFile: '$(Pipeline.Workspace)/Solucion/$(SolutionName)_managed.zip'
+              ${{ if eq(parameters.tipoDespliegue, 'Upgrade') }}:
+                HoldingSolution: true
+              AsyncOperation: true
+              MaxAsyncWaitTime: 60
+              PublishWorkflows: true
+          - ${{ if eq(parameters.tipoDespliegue, 'Upgrade') }}:
+            - task: PowerPlatformApplySolutionUpgrade@2
+              displayName: 'Aplicar el upgrade de $(SolutionName)'
+              inputs:
+                authenticationType: 'PowerPlatformSPN'
+                PowerPlatformSPN: 'Devops_prod'
+                SolutionName: '$(SolutionName)'
+                AsyncOperation: true
+                MaxAsyncWaitTime: 60
